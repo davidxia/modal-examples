@@ -22,8 +22,7 @@ import modal
 
 L.basicConfig(
     level=L.INFO,
-    format="\033[0;32m%(asctime)s %(levelname)s
-[%(filename)s.%(funcName)-22s:%(lineno)-3d] %(message)s\033[0m",
+    format="\033[0;32m%(asctime)s %(levelname)s [%(filename)s.%(funcName)-22s:%(lineno)-3d] %(message)s\033[0m",
     datefmt="%b %d %H:%M:%S",
 )
 
@@ -56,8 +55,7 @@ colabfold_image = (
         "git clone https://github.com/soedinglab/MMseqs2",
         f"cd MMseqs2 && git checkout {mmseqs_commit_id}",
         "cd MMseqs2 && mkdir build",
-        "cd MMseqs2/build && cmake -DCMAKE_BUILD_TYPE=RELEASE -DHAVE_ZLIB=1
--DCMAKE_INSTALL_PREFIX=. ..",
+        "cd MMseqs2/build && cmake -DCMAKE_BUILD_TYPE=RELEASE -DHAVE_ZLIB=1 -DCMAKE_INSTALL_PREFIX=. ..",
         "cd MMseqs2/build && make -j4",
         "cd MMseqs2/build && make install ", # TODO GPU installn
         "ln -s /MMseqs2/build/bin/mmseqs /usr/local/bin/mmseqs",
@@ -329,8 +327,8 @@ def setup_mmcif_database(
 
 @app.local_entrypoint()
 def main(
-    mmseqs_no_index: bool = True, 
-    mmseqs_force_merge: bool = False, 
+    mmseqs_no_index: bool = True,
+    mmseqs_force_merge: bool = False,
     pdb_aws_snapshot: str = "20240101",
 ):
 
