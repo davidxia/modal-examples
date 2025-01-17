@@ -57,7 +57,7 @@ colabfold_image = (
         "cd MMseqs2 && mkdir build",
         "cd MMseqs2/build && cmake -DCMAKE_BUILD_TYPE=RELEASE -DHAVE_ZLIB=1 -DCMAKE_INSTALL_PREFIX=. ..",
         "cd MMseqs2/build && make -j4",
-        "cd MMseqs2/build && make install ", # TODO GPU installn
+        "cd MMseqs2/build && make install ", # TODO GPU version
         "ln -s /MMseqs2/build/bin/mmseqs /usr/local/bin/mmseqs",
     )
     .run_commands(
@@ -68,6 +68,10 @@ colabfold_image = (
         "colabfold[alphafold-minus-jax]==1.5.5",
         "aria2p==0.12.0",
         "tqdm==4.67.1",
+    )
+    # TODO: Hack for debugging faster, remove later
+    .copy_local_file(Path(__file__).parent / "copy_of_search_with_1_iteration.py",
+        "/usr/local/lib/python3.11/site-packages/colabfold/mmseqs/search.py"
     )
 )
 

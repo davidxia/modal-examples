@@ -11,6 +11,20 @@ Will take 20 minutes:
 `modal run run_colabfold_search`
 
 
+## Running Faster
+- Slowest part of modal_setup_databases.py is setup_colabfold_db() does:
+- - D/l \*.tar.gz (~1.5hrs)
+- - Extraction to create a few \*.tar.gz files (0.5hrs)
+- - mmseqs tsv2exprofiledb (1hr)
+
+If there is a bug here it's probably only in step 3
+
+- run_colabfold_search does 3 iterations of searching,
+- -  should be able to shorten it to 1, added a copy_file for that in the image def
+- - also maybe we can delete uniref30_2302 and only search colabfold_envdb_202108
+
+
+
 ## References
 - [ColabFold](https://github.com/sokrypton/ColabFold)
 - [mmseqs](https://github.com/soedinglab/MMseqs2)
