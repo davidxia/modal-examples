@@ -141,7 +141,7 @@ def extract_with_progress(
 @app.function(
     image=colabfold_image,
     volumes={volume_path: volume},
-    memory=2 * GiB,
+    memory=32 * GiB,
     timeout=4 * HOURS,
 )
 def setup_colabfold_db(url: str, mmseqs_no_index: bool, mmseqs_force_merge: bool):
@@ -269,6 +269,7 @@ def scan_directory(subdir_path):
             read_only=True
         ),
     },
+    memory=32 * GiB,
     timeout=6 * HOURS,
 )
 def setup_mmcif_database(
