@@ -166,6 +166,7 @@ def setup_colabfold_db(url: str, mmseqs_no_index: bool, mmseqs_force_merge: bool
     L.info(f"converting TSV to MMseqs2 DB: {db_foldername}")
     setup_env = os.environ.copy()
     setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
+    setup_env["MMSEQS_NO_INDEX"] = "1" if mmseqs_no_index else "0"
     command = [
         "mmseqs",
         "tsv2exprofiledb",
@@ -216,6 +217,7 @@ def setup_colabfold_fasta_db(url: str, mmseqs_no_index: bool, mmseqs_force_merge
     L.info(f"creating MMseqs2 DB from {dest_filepath}")
     setup_env = os.environ.copy()
     setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
+    setup_env["MMSEQS_NO_INDEX"] = "1" if mmseqs_no_index else "0"
     command = [
         "mmseqs",
         "createdb",
@@ -328,7 +330,7 @@ def setup_mmcif_database(
 @app.local_entrypoint()
 def main(
     mmseqs_no_index: bool = True,
-    mmseqs_force_merge: bool = False,
+    mmseqs_force_merge: bool = True,
     pdb_aws_snapshot: str = "20240101",
 ):
 
