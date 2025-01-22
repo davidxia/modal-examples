@@ -38,7 +38,7 @@ ARIA_NUM_CONNECTIONS = 8
 # ColabFold uses this commit (May 28, 2023) to create the databases and perform searches.
 mmseqs_commit_id = "71dd32ec43e3ac4dabf111bbc4b124f1c66a85f1"
 
-app_name = "example-compbio-colabfold"
+app_name = "example-colabfold-setup"
 app = modal.App(app_name)
 
 volume = modal.Volume.from_name(
@@ -65,12 +65,16 @@ colabfold_image = (
     )
     .workdir("/ColabFold")
     .pip_install(
-        "colabfold[alphafold-minus-jax]==1.5.5",
+        "colabfold[alphafold-minus-jax]==1.5.5",  # From colabfold releases
         "aria2p==0.12.0",
         "tqdm==4.67.1",
     )
     # TODO: Hack for debugging faster, remove later
-    .copy_local_file(Path(__file__).parent / "copy_of_search_with_1_iteration.py",
+    .add_local_file(
+        Path(__file__).parent / "input.fasta",
+        "/input.fasta")
+    .add_local_file(
+        Path(__file__).parent / "copy_of_search_with_edits.py",
         "/usr/local/lib/python3.11/site-packages/colabfold/mmseqs/search.py"
     )
 )
