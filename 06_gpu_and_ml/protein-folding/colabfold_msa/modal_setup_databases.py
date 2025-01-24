@@ -16,7 +16,7 @@
 import logging as L
 import os
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import modal
 
@@ -35,7 +35,7 @@ GiB = 1024 # mebibytes
 
 mmseqs_infrastructure_config = {
     'cpu' : 32,
-    'memory' : (1024 + 128) * GiB 
+    'memory' : (1024 + 128) * GiB,
 }
 
 ARIA_NUM_CONNECTIONS = 8
@@ -69,7 +69,7 @@ colabfold_image = (
         "ln -s /MMseqs2/build/bin/mmseqs /usr/local/bin/mmseqs",
     )
     .pip_install(
-        "colabfold[alphafold-minus-jax]==1.5.5",  
+        "colabfold[alphafold-minus-jax]==1.5.5",
         "aria2p==0.12.0",
         "tqdm==4.67.1",
     )
@@ -104,7 +104,7 @@ def download_file(url, dest_path, filename):
         url
     ]
     subprocess.run(command, check=True)
-    
+
     return dest_path / filename
 
 def extract_with_progress(
@@ -124,7 +124,6 @@ def extract_with_progress(
     if extraction_complete_filepath.exists():
         L.info("extraction already complete, skipping")
         return extraction_filepath
-        
 
     mode = "r|*"
     L.info(f"opening with tarfile mode {mode}")
@@ -158,25 +157,26 @@ def extract_with_progress(
     return extraction_filepath
 
 @app.function(
-    image=colabfold_image
+    image=colabfold_image,
     volumes={volume_path: volume},
     timeout=8 * HOURS, # TODO ??
     **mmseqs_infrastructure_config
 )
 def run_mmseqs_create_index(db_filepath, mmseqs_force_merge):
+    import subprocess
     import tempfile
 
     setup_env = os.environ.copy()
     setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
     subprocess.run(
-        ["mmseqs", "createindex", db_filepath] +  
+        ["mmseqs", "createindex", db_filepath] +
         [tempfile.mkdtemp(), "--remove-tmp-files", 1],
-        check=True, 
+        check=True,
         env=setup_env
     )
 
     volume.commit()
-    
+
 
 @app.function(
     image=colabfold_image,
@@ -199,22 +199,22 @@ def setup_profile_database(
     extraction_filepath = extract_with_progress(download_filepath)
 
     db_filepath = (
-        extraction_filepath.with_stem(extracted_filepath.stem  + "_db")
-    )   
+        extraction_filepath.with_stem(extraction_filepath.stem  + "_db")
+    )
 
     L.info(f"converting TSV to MMseqs2 DB: {db_filepath}")
     setup_env = os.environ.copy()
     setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
     subprocess.run(
-        "mmseqs", "tsv2exprofiledb", extraction_filepath, db_filepath
-        check=True, 
+        ["mmseqs", "tsv2exprofiledb", extraction_filepath, db_filepath],
+        check=True,
         env=setup_env
     )
     volume.commit()
 
     if not mmseqs_no_index:
-        run_mmseqs_create_index.remote(db_)
-    
+        run_mmseqs_create_index.remote(db_filepath)
+
 
 @app.function(
     image=colabfold_image,
@@ -234,12 +234,12 @@ def setup_fasta_database(
     download_filepath = download_file(url, data_path, filename)
 
     db_filepath = download_filepath.with_suffix("").with_suffix("")
-    L.info(f"creating MMseqs2 DB from {dest_filepath} to {db_path}")
+    L.info(f"creating MMseqs2 DB from {download_filepath} to {db_filepath}")
     setup_env = os.environ.copy()
     setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
     subprocess.run(
         ["mmseqs", "createdb", download_filepath, db_filepath],
-        check=True, 
+        check=True,
         env=setup_env
     )
     volume.commit()
@@ -258,7 +258,7 @@ def setup_foldseek_database(base_url: str, pdb_db_name: str):
     L.info(f"downloading from {url} to {data_path}")
     download_filepath = download_file(url, data_path, filename)
 
-    L.info(f"extracting {download_path}")
+    L.info(f"extracting {download_filepath}")
     extract_with_progress(download_filepath, with_pattern="a3m")
     volume.commit()
 
@@ -372,7 +372,6 @@ def main(
     pdb_aws_snapshot: str = "20240101",
     mmseqs_no_index: bool = False, # TODO
     mmseqs_force_merge: bool = True,
-    pdb_aws_snapshot: str = "20240101",
 ):
 
     colabfold_url = "https://wwwuser.gwdg.de/~compbiol/colabfold/"
