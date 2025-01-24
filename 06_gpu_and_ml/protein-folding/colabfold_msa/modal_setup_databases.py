@@ -33,14 +33,19 @@ HOURS = 60 * MINUTES  # seconds
 
 GiB = 1024 # mebibytes
 
+mmseqs_infrastructure_config = {
+    'cpu' : 32,
+    'memory' : (1024 + 128) * GiB 
+}
+
 ARIA_NUM_CONNECTIONS = 8
 
-# ColabFold uses this commit (May 28, 2023) to create the databases and perform searches.
-mmseqs_commit_id = "71dd32ec43e3ac4dabf111bbc4b124f1c66a85f1"
 
 app_name = "example-colabfold-setup"
 app = modal.App(app_name)
 
+
+print("setting up data storage & paths")
 volume = modal.Volume.from_name(
     "example-compbio-colab-v3", create_if_missing=True
 )
@@ -48,6 +53,9 @@ volume_path = Path("/vol")
 data_path = volume_path / "data"
 s3_bucket_path = Path("/s3")
 
+
+# ColabFold uses this commit (May 28, 2023) to create the databases and perform searches.
+mmseqs_commit_id = "71dd32ec43e3ac4dabf111bbc4b124f1c66a85f1"
 colabfold_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "curl", "cmake", "zlib1g-dev", "wget", "aria2", "rsync")
@@ -57,15 +65,11 @@ colabfold_image = (
         "cd MMseqs2 && mkdir build",
         "cd MMseqs2/build && cmake -DCMAKE_BUILD_TYPE=RELEASE -DHAVE_ZLIB=1 -DCMAKE_INSTALL_PREFIX=. ..",
         "cd MMseqs2/build && make -j4",
-        "cd MMseqs2/build && make install ", # TODO GPU version
+        "cd MMseqs2/build && make install ",
         "ln -s /MMseqs2/build/bin/mmseqs /usr/local/bin/mmseqs",
     )
-    .run_commands(
-        "git clone https://github.com/sokrypton/ColabFold",
-    )
-    .workdir("/ColabFold")
     .pip_install(
-        "colabfold[alphafold-minus-jax]==1.5.5",  # From colabfold releases
+        "colabfold[alphafold-minus-jax]==1.5.5",  
         "aria2p==0.12.0",
         "tqdm==4.67.1",
     )
@@ -88,7 +92,7 @@ mmcif_image = (
 with mmcif_image.imports():
     import shutil
 
-def download_file(url, filename):
+def download_file(url, dest_path, filename):
     import subprocess
     command = [
        "aria2c",
@@ -96,10 +100,12 @@ def download_file(url, filename):
         "-x", str(ARIA_NUM_CONNECTIONS),
         "-o", filename,
         "-c",
-        "-d", data_path,
+        "-d", dest_path,
         url
     ]
     subprocess.run(command, check=True)
+    
+    return dest_path / filename
 
 def extract_with_progress(
     filepath,
@@ -107,11 +113,19 @@ def extract_with_progress(
     chunk_size=1024 * 1024
 ):
     import tarfile
-
     from tqdm import tqdm
+    assert filepath[-len(".tar.gz"):] == ".tar.gz"
 
-    # with tarfile.open(filepath, 'r:*') as tar:
-    # mode = "r:*"
+    extraction_filepath = filepath.with_suffix("").with_suffix("")
+
+    extraction_complete_filepath = (
+        filepath.with_suffix("").with_suffix(".complete")
+    )
+    if extraction_complete_filepath.exists():
+        L.info("extraction already complete, skipping")
+        return extraction_filepath
+        
+
     mode = "r|*"
     L.info(f"opening with tarfile mode {mode}")
     with tarfile.open(filepath, mode) as tar:
@@ -141,98 +155,111 @@ def extract_with_progress(
 
             file_progress.close()
 
+    return extraction_filepath
 
 @app.function(
-    image=colabfold_image,
+    image=colabfold_image
     volumes={volume_path: volume},
-    memory=32 * GiB,
-    timeout=4 * HOURS,
+    timeout=8 * HOURS, # TODO ??
+    **mmseqs_infrastructure_config
 )
-def setup_colabfold_db(url: str, mmseqs_no_index: bool, mmseqs_force_merge: bool):
-    import subprocess
-    assert mmseqs_no_index, "mmseqs_no_index=false is not supported yet (wip)"
+def run_mmseqs_create_index(db_filepath, mmseqs_force_merge):
+    import tempfile
 
-    filename = urlparse(url).path.split("/")[-1]
-    dest_filepath = data_path / filename
-    extraction_complete_filepath = (
-        dest_filepath.with_suffix("").with_suffix(".complete")
+    setup_env = os.environ.copy()
+    setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
+    subprocess.run(
+        ["mmseqs", "createindex", db_filepath] +  
+        [tempfile.mkdtemp(), "--remove-tmp-files", 1],
+        check=True, 
+        env=setup_env
     )
 
-    L.info(f"downloading from {url} to {dest_filepath}")
-    download_file(url, filename)
-
-    if not extraction_complete_filepath.exists():
-        L.info(f"extracting {dest_filepath}")
-        extract_with_progress(dest_filepath)
-        extraction_complete_filepath.touch()
-    else:
-        L.info("extraction already complete, skipping")
-    extracted_folder = data_path / Path(Path(filename).stem).stem
-
-    db_foldername = extracted_folder.with_stem(extracted_folder.stem  + "_db")
-
-    L.info(f"converting TSV to MMseqs2 DB: {db_foldername}")
-    setup_env = os.environ.copy()
-    setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
-    setup_env["MMSEQS_NO_INDEX"] = "1" if mmseqs_no_index else "0"
-    command = [
-        "mmseqs",
-        "tsv2exprofiledb",
-        extracted_folder,
-        db_foldername,
-    ]
-    subprocess.run(command, check=True, env=setup_env)
     volume.commit()
+    
 
 @app.function(
     image=colabfold_image,
     volumes={volume_path: volume},
-    memory=2 * GiB,
+    memory=4 * GiB,
     timeout=4 * HOURS,
 )
-def setup_hhsuite_data(url: str):
-    filename = urlparse(url).path.split("/")[-1]
-    dest_filepath = data_path / filename
+def setup_profile_database(
+    base_url: str, db_name: str, mmseqs_no_index: bool, mmseqs_force_merge: bool
+):
+    import subprocess
 
-    L.info(f"downloading from {url} to {dest_filepath}")
-    download_file(url, filename)
+    filename = db_name + ".tar.gz"
+    url = urljoin(base_url, filename)
+    download_filepath = data_path / filename
 
-    L.info(f"extracting {dest_filepath}")
-    extract_with_progress(data_path / filename, with_pattern="a3m")
+    L.info(f"downloading from {url} to {download_filepath}")
+    download_filepath = download_file(url, data_path, filename)
+
+    extraction_filepath = extract_with_progress(download_filepath)
+
+    db_filepath = (
+        extraction_filepath.with_stem(extracted_filepath.stem  + "_db")
+    )   
+
+    L.info(f"converting TSV to MMseqs2 DB: {db_filepath}")
+    setup_env = os.environ.copy()
+    setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
+    subprocess.run(
+        "mmseqs", "tsv2exprofiledb", extraction_filepath, db_filepath
+        check=True, 
+        env=setup_env
+    )
     volume.commit()
+
+    if not mmseqs_no_index:
+        run_mmseqs_create_index.remote(db_)
+    
 
 @app.function(
     image=colabfold_image,
     volumes={volume_path: volume},
-    memory=2 * GiB,
-    timeout=1 * HOURS,
+    memory=4 * GiB,
+    timeout=4 * HOURS,
 )
-def setup_colabfold_fasta_db(url: str, mmseqs_no_index: bool, mmseqs_force_merge: bool):
+def setup_fasta_database(
+    base_url: str, pdb_db_name: str, mmseqs_force_merge: bool
+):
     import subprocess
-    assert mmseqs_no_index, "mmseqs_no_index=false is not supported yet (wip)"
-    try:
-        subprocess.run(["nvidia-smi"], check=True)
-        assert 0, "mmseqs with gpu not supported yet"
-    except Exception:
-        pass
 
-    filename = urlparse(url).path.split("/")[-1]
-    dest_filepath = data_path / filename
+    filename = pdb_db_name + ".fasta.gz"
+    url = urljoin(base_url, filename)
 
-    L.info(f"downloading from {url} to {dest_filepath}")
-    download_file(url, filename)
+    L.info(f"downloading from {url} to {data_path}")
+    download_filepath = download_file(url, data_path, filename)
 
-    L.info(f"creating MMseqs2 DB from {dest_filepath}")
+    db_filepath = download_filepath.with_suffix("").with_suffix("")
+    L.info(f"creating MMseqs2 DB from {dest_filepath} to {db_path}")
     setup_env = os.environ.copy()
     setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
-    setup_env["MMSEQS_NO_INDEX"] = "1" if mmseqs_no_index else "0"
-    command = [
-        "mmseqs",
-        "createdb",
-        dest_filepath,
-        dest_filepath.with_suffix("").with_suffix("")
-    ]
-    subprocess.run(command, check=True, env=setup_env)
+    subprocess.run(
+        ["mmseqs", "createdb", download_filepath, db_filepath],
+        check=True, 
+        env=setup_env
+    )
+    volume.commit()
+
+
+@app.function(
+    image=colabfold_image,
+    volumes={volume_path: volume},
+    memory=4 * GiB,
+    timeout=4 * HOURS,
+)
+def setup_foldseek_database(base_url: str, pdb_db_name: str):
+    filename = pdb_db_name + ".tar.gz"
+    url = urljoin(base_url, filename)
+
+    L.info(f"downloading from {url} to {data_path}")
+    download_filepath = download_file(url, data_path, filename)
+
+    L.info(f"extracting {download_path}")
+    extract_with_progress(download_filepath, with_pattern="a3m")
     volume.commit()
 
 
@@ -273,7 +300,7 @@ def scan_directory(subdir_path):
             read_only=True
         ),
     },
-    memory=32 * GiB,
+    memory=8 * GiB,
     timeout=6 * HOURS,
 )
 def setup_mmcif_database(
@@ -338,47 +365,36 @@ def setup_mmcif_database(
 
 @app.local_entrypoint()
 def main(
-    mmseqs_no_index: bool = True,
+    uniref_db_name="uniref30_2302",
+    metagenomic_db_name="colabfold_envdb_2021",
+    pdb_db_name="pdb100_230517",
+    pdb_foldseek_db_name="pdb100_foldseek_230517",
+    pdb_aws_snapshot: str = "20240101",
+    mmseqs_no_index: bool = False, # TODO
     mmseqs_force_merge: bool = True,
     pdb_aws_snapshot: str = "20240101",
 ):
 
-    colabfold_url = "https://wwwuser.gwdg.de/~compbiol/colabfold/" # sic
+    colabfold_url = "https://wwwuser.gwdg.de/~compbiol/colabfold/"
     hhsuite_url = (
         "https://wwwuser.gwdg.de/~compbiol/data/hhsuite/databases/hhsuite_dbs/"
     )
 
     function_calls = [
-        # Data from colabfold
-        setup_colabfold_db.spawn(
-            urljoin(colabfold_url, "uniref30_2302.tar.gz"),
-            mmseqs_no_index,
-            mmseqs_force_merge,
+        setup_profile_database.spawn(
+            colabfold_url, uniref_db_name, mmseqs_no_index, mmseqs_force_merge,
         ),
-        setup_colabfold_db.spawn(
-            urljoin(colabfold_url, "colabfold_envdb_202108.tar.gz"),
-            mmseqs_no_index,
-            mmseqs_force_merge,
+        setup_profile_database.spawn(
+            colabfold_url, metagenomic_db_name, mmseqs_no_index, mmseqs_force_merge,
         ),
-        setup_colabfold_fasta_db.spawn(
-            urljoin(colabfold_url,  "pdb100_230517.fasta.gz"),
-            mmseqs_no_index,
-            mmseqs_force_merge,
-        ),
-
-        # Data from HHSuite
-        setup_hhsuite_data.spawn(urljoin(hhsuite_url, "pdb100_foldseek_230517.tar.gz")),
-
-        # MMCIF data
+        setup_fasta_database.spawn(colabfold_url, pdb_db_name, mmseqs_force_merge),
+        setup_foldseek_database.spawn(hhsuite_url, pdb_db_name),
         setup_mmcif_database.spawn(pdb_aws_snapshot, "divided"),
         setup_mmcif_database.spawn(pdb_aws_snapshot, "obsolete"),
     ]
 
     for function_call in function_calls:
-        L.info(function_call.get(timeout=4 * HOURS))
-
-
-# ## Addenda
+        L.info(function_call.get())
 
 # ### Helper Functions
 
