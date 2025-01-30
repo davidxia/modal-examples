@@ -19,6 +19,7 @@ app_name = "example-colabfold-search"
 app = modal.App(app_name)
 
 
+"""
 @app.function(
     image=colabfold_image,
     volumes={volume_path: volume},
@@ -30,7 +31,7 @@ def reset():
     import subprocess
     import os
 
-    subprocess.run("rm /vol/data3/*_db*", check=True, shell=True)
+    subprocess.run("rm /vol/data/*_db*", check=True, shell=True)
 
     setup_env = os.environ.copy()
     setup_env["MMSEQS_FORCE_MERGE"] = "1"
@@ -40,11 +41,12 @@ def reset():
         command = [
             "mmseqs",
             "tsv2exprofiledb",
-            f"/vol/data3/{x}",
-            f"/vol/data3/{x}_db",
+            f"/vol/data/{x}",
+            f"/vol/data/{x}_db",
         ]
         subprocess.run(command, check=True, env=setup_env)
     volume.commit()
+"""
 
 @app.function(
     image=colabfold_image,
@@ -73,7 +75,7 @@ def run_colabfold_search(
     output_dir = Path("msas")
 
     subprocess.run(
-     ["colabfold_search", fasta_filepath, "/vol/data3", output_dir] + args,
+     ["colabfold_search", fasta_filepath, data_path, output_dir] + args,
      check=True)
 
 

@@ -20,6 +20,9 @@ from urllib.parse import urljoin
 
 import modal
 
+app_name = "example-colabfold-setup"
+app = modal.App(app_name)
+
 L.basicConfig(
     level=L.INFO,
     format="\033[0;32m%(asctime)s %(levelname)s [%(filename)s.%(funcName)-22s:%(lineno)-3d] %(message)s\033[0m",
@@ -34,16 +37,9 @@ HOURS = 60 * MINUTES  # seconds
 GiB = 1024 # mebibytes
 
 mmseqs_infrastructure_config = {
-    'cpu' : 32,
-    'memory' : (1024 + 128) * GiB,
+    'cpu' : 64,
+    'memory' : (336) * GiB,
 }
-
-ARIA_NUM_CONNECTIONS = 8
-
-
-app_name = "example-colabfold-setup"
-app = modal.App(app_name)
-
 
 print("setting up data storage & paths")
 volume = modal.Volume.from_name(
@@ -92,70 +88,6 @@ mmcif_image = (
 with mmcif_image.imports():
     import shutil
 
-def download_file(url, dest_path, filename):
-    import subprocess
-    command = [
-       "aria2c",
-        "--log-level=warn",
-        "-x", str(ARIA_NUM_CONNECTIONS),
-        "-o", filename,
-        "-c",
-        "-d", dest_path,
-        url
-    ]
-    subprocess.run(command, check=True)
-
-    return dest_path / filename
-
-def extract_with_progress(
-    filepath,
-    with_pattern="",
-    chunk_size=1024 * 1024
-):
-    import tarfile
-    from tqdm import tqdm
-    assert filepath[-len(".tar.gz"):] == ".tar.gz"
-
-    extraction_filepath = filepath.with_suffix("").with_suffix("")
-
-    extraction_complete_filepath = (
-        filepath.with_suffix("").with_suffix(".complete")
-    )
-    if extraction_complete_filepath.exists():
-        L.info("extraction already complete, skipping")
-        return extraction_filepath
-
-    mode = "r|*"
-    L.info(f"opening with tarfile mode {mode}")
-    with tarfile.open(filepath, mode) as tar:
-        L.info("opened")
-        for member in tar:
-            if not member.isfile() or with_pattern not in member.name:
-                continue
-            member_path = data_path / member.name
-
-            if member_path.exists() and member_path.stat().st_size == member.size:
-                L.info(f"already extracted {member.name}, skipping")
-                continue
-
-            extract_file = tar.extractfile(member)
-            L.info(f"member size: {format_human_readable_bytes(member.size)}")
-
-            file_progress = tqdm(
-                total=member.size, unit='B', desc=member.name, unit_scale=True
-            )
-            with open(member_path, 'wb') as f:
-                while True:
-                    chunk = extract_file.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    file_progress.update(len(chunk))
-
-            file_progress.close()
-
-    return extraction_filepath
-
 @app.function(
     image=colabfold_image,
     volumes={volume_path: volume},
@@ -170,7 +102,7 @@ def run_mmseqs_create_index(db_filepath, mmseqs_force_merge):
     setup_env["MMSEQS_FORCE_MERGE"] = "1" if mmseqs_force_merge else "0"
     subprocess.run(
         ["mmseqs", "createindex", db_filepath] +
-        [tempfile.mkdtemp(), "--remove-tmp-files", 1],
+        [tempfile.mkdtemp(), "--remove-tmp-files", "1"],
         check=True,
         env=setup_env
     )
@@ -213,7 +145,7 @@ def setup_profile_database(
     volume.commit()
 
     if not mmseqs_no_index:
-        run_mmseqs_create_index.remote(db_filepath)
+        run_mmseqs_create_index.remote(db_filepath, mmseqs_force_merge)
 
 
 @app.function(
@@ -243,6 +175,9 @@ def setup_fasta_database(
         env=setup_env
     )
     volume.commit()
+
+    if not mmseqs_no_index:
+        run_mmseqs_create_index.remote(db_filepath, mmseqs_force_merge)
 
 
 @app.function(
@@ -396,6 +331,74 @@ def main(
         L.info(function_call.get())
 
 # ### Helper Functions
+
+def download_file(url, dest_path, filename):
+    import subprocess
+    ARIA_NUM_CONNECTIONS = 8
+    command = [
+       "aria2c",
+        "--log-level=warn",
+        "-x", str(ARIA_NUM_CONNECTIONS),
+        "-o", filename,
+        "-c",
+        "-d", dest_path,
+        url
+    ]
+    subprocess.run(command, check=True)
+
+    return dest_path / filename
+
+
+def extract_with_progress(
+    filepath,
+    with_pattern="",
+    chunk_size=1024 * 1024
+):
+    import tarfile
+
+    from tqdm import tqdm
+    assert filepath[-len(".tar.gz"):] == ".tar.gz"
+
+    extraction_filepath = filepath.with_suffix("").with_suffix("")
+
+    extraction_complete_filepath = (
+        filepath.with_suffix("").with_suffix(".complete")
+    )
+    if extraction_complete_filepath.exists():
+        L.info("extraction already complete, skipping")
+        return extraction_filepath
+
+    mode = "r|*"
+    L.info(f"opening with tarfile mode {mode}")
+    with tarfile.open(filepath, mode) as tar:
+        L.info("opened")
+        for member in tar:
+            if not member.isfile() or with_pattern not in member.name:
+                continue
+            member_path = data_path / member.name
+
+            if member_path.exists() and member_path.stat().st_size == member.size:
+                L.info(f"already extracted {member.name}, skipping")
+                continue
+
+            extract_file = tar.extractfile(member)
+            L.info(f"member size: {format_human_readable_bytes(member.size)}")
+
+            file_progress = tqdm(
+                total=member.size, unit='B', desc=member.name, unit_scale=True
+            )
+            with open(member_path, 'wb') as f:
+                while True:
+                    chunk = extract_file.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    file_progress.update(len(chunk))
+
+            file_progress.close()
+
+    return extraction_filepath
+
 
 def format_human_readable_bytes(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
