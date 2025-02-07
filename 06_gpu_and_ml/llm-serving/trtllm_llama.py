@@ -51,14 +51,15 @@
 # which includes the CUDA runtime & development libraries
 # and the environment configuration necessary to run them.
 
+from pathlib import Path
 from typing import Optional
 
 import modal
 import pydantic  # for typing, used later
 
 tensorrt_image = modal.Image.from_registry(
-    "nvidia/cuda:12.4.1-devel-ubuntu22.04",
-    add_python="3.10",  # TRT-LLM requires Python 3.10
+    "nvidia/cuda:12.8.0-devel-ubuntu22.04",
+    add_python="3.12",  # TRT-LLM requires Python 3.10
 ).entrypoint([])  # remove verbose logging by base image on entry
 
 # On top of that, we add some system dependencies of TensorRT-LLM,
@@ -68,7 +69,7 @@ tensorrt_image = modal.Image.from_registry(
 tensorrt_image = tensorrt_image.apt_install(
     "openmpi-bin", "libopenmpi-dev", "git", "git-lfs", "wget"
 ).pip_install(
-    "tensorrt_llm==0.14.0",
+    "tensorrt-llm==0.17.0.post1",
     "pynvml<12",  # avoid breaking change to pynvml version API
     pre=True,
     extra_index_url="https://pypi.nvidia.com",
@@ -88,11 +89,21 @@ tensorrt_image = tensorrt_image.apt_install(
 
 # Next, we download the model we want to serve. In this case, we're using the instruction-tuned
 # version of Meta's LLaMA 3 8B model.
-# We use the function below to download the model from the Hugging Face Hub.
+# We use the function below to download the model from the Hugging Face Hub onto
+# a [Modal Volume](https://modal.com/docs/guide/volumes) so that we never have to
+# redownload it from Hugging Face, even if our image is evicted from
+# [the cache](https://modal.com/docs/guide/images#image-caching-and-rebuilds).
 
-MODEL_DIR = "/root/model/model_input"
 MODEL_ID = "NousResearch/Meta-Llama-3-8B-Instruct"  # fork without repo gating
+# MODEL_REVISION = "53346005fb0ef11d3b6a83b12c895cca40156b6c"  # pin model revisions to prevent unexpected changes!
 MODEL_REVISION = "b1532e4dee724d9ba63fe17496f298254d87ca64"  # pin model revisions to prevent unexpected changes!
+
+volume = modal.Volume.from_name(
+    "example-trtllm-volume", create_if_missing=True
+)
+VOLUME_PATH = Path("/vol")
+MODELS_PATH = VOLUME_PATH / "models"
+MODEL_PATH = MODELS_PATH / MODEL_ID
 
 
 def download_model():
@@ -101,10 +112,10 @@ def download_model():
     from huggingface_hub import snapshot_download
     from transformers.utils import move_cache
 
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(MODEL_PATH, exist_ok=True)
     snapshot_download(
         MODEL_ID,
-        local_dir=MODEL_DIR,
+        local_dir=MODEL_PATH,
         ignore_patterns=["*.pt", "*.bin"],  # using safetensors
         revision=MODEL_REVISION,
     )
@@ -118,15 +129,16 @@ def download_model():
 MINUTES = 60  # seconds
 tensorrt_image = (  # update the image by downloading the model we're using
     tensorrt_image.pip_install(  # add utilities for downloading the model
-        "hf-transfer==0.1.8",
-        "huggingface_hub==0.26.2",
-        "requests~=2.31.0",
+        "hf-transfer==0.1.9",
+        "huggingface_hub==0.28.1",
+        "requests~=2.32.3",
     )
     .env(  # hf-transfer for faster downloads
         {"HF_HUB_ENABLE_HF_TRANSFER": "1"}
     )
     .run_function(  # download the model
         download_model,
+        volumes={VOLUME_PATH: volume},
         timeout=20 * MINUTES,
     )
 )
@@ -145,7 +157,7 @@ tensorrt_image = (  # update the image by downloading the model we're using
 # We use a quantization script provided by the TensorRT-LLM team.
 # This script takes a few minutes to run.
 
-GIT_HASH = "b0880169d0fb8cd0363049d91aa548e58a41be07"
+GIT_HASH = "b7e277d104390a2e1c988fbead5bbb6c4a2df1ac"  # Should match trt-llm version
 CONVERSION_SCRIPT_URL = f"https://raw.githubusercontent.com/NVIDIA/TensorRT-LLM/{GIT_HASH}/examples/quantization/quantize.py"
 
 # NVIDIA's Ada Lovelace/Hopper chips, like the 4090, L40S, and H100,
@@ -165,19 +177,26 @@ KV_CACHE_DTYPE = "fp8"  # format we quantize the KV cache to
 
 CALIB_SIZE = "512"  # size of calibration dataset
 
-# We put that all together with another invocation of `.run_commands`.
+# We put that all together with another function and invocation of `.run_function`.
 
 QUANTIZATION_ARGS = f"--dtype={DTYPE} --qformat={QFORMAT} --kv_cache_dtype={KV_CACHE_DTYPE} --calib_size={CALIB_SIZE}"
 
-CKPT_DIR = "/root/model/model_ckpt"
-tensorrt_image = (  # update the image by quantizing the model
-    tensorrt_image.run_commands(  # takes ~2 minutes
+CKPT_DIR = "/root/trtllm-model/model_ckpt"
+def quantize_model():
+    import subprocess
+    import urllib.request
+    urllib.request.urlretrieve(CONVERSION_SCRIPT_URL, "/root/convert.py")
+    subprocess.run(
         [
-            f"wget {CONVERSION_SCRIPT_URL} -O /root/convert.py",
-            f"python /root/convert.py --model_dir={MODEL_DIR} --output_dir={CKPT_DIR}"
-            + f" --tp_size={N_GPUS}"
-            + f" {QUANTIZATION_ARGS}",
-        ],
+            "python", "/root/convert.py", f"--model_dir={MODEL_PATH}",
+            f"--output_dir={CKPT_DIR}", f"--tp_size={N_GPUS}",
+        ] + QUANTIZATION_ARGS.split(" ")
+    )
+
+tensorrt_image = (  # update the image by quantizing the model
+    tensorrt_image.run_function(  # takes ~2 minutes
+        quantize_model,
+        volumes={VOLUME_PATH: volume},
         gpu=GPU_CONFIG,
     )
 )
@@ -210,7 +229,7 @@ MAX_NUM_TOKENS = 2**17
 MAX_BATCH_SIZE = (
     1024  # better throughput at larger batch sizes, limited by GPU RAM
 )
-ENGINE_DIR = "/root/model/model_output"
+ENGINE_DIR = "/root/trtllm-model/model_output"
 
 SIZE_ARGS = f"--max_input_len={MAX_INPUT_LEN} --max_num_tokens={MAX_NUM_TOKENS} --max_batch_size={MAX_BATCH_SIZE}"
 
@@ -571,6 +590,9 @@ def main():
         "Hello: ",
         "Greetings. ",
     ]
+
+    questions = questions[-1:]
+    prefixes = prefixes[-1:]
     # prepending any string that causes a tokenization change is enough to invalidate KV cache
     for ii, prefix in enumerate(prefixes):
         questions += [prefix + question for question in questions[:128]]
