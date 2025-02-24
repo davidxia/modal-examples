@@ -1,6 +1,16 @@
 from pathlib import Path
 import modal
 
+import asyncio
+import time
+from uuid import uuid4
+import json
+
+start_time = time.monotonic()  # on remote, time that code started running Modal
+
+here = Path(__file__).parent
+deployment_id = uuid4()
+
 trtllm_version = "0.17.0.post1"
 
 if trtllm_version == "0.17.0.post1":
@@ -14,12 +24,14 @@ N_GPUS = 1
 GPU_CONFIG = f"H100:{N_GPUS}"
 
 # MODEL_ID = "NousResearch/Meta-Llama-3-8B-Instruct"  # fork without repo gating
-MODEL_ID = "unsloth/Qwen2.5-Coder-7B-Instruct"  # default full precision model
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
+# FP8 does not work with this model:
+# MODEL_ID = "unsloth/Qwen2.5-Coder-7B-Instruct"  # default full precision model
 
 MINUTES = 60  # seconds
 
 
-app = modal.App("example-trtlllm-v2")
+app = modal.App("example-trtlllm-v3")
 
 volume = modal.Volume.from_name(
     "example-trtllm-volume-v2", create_if_missing=True
@@ -30,60 +42,78 @@ DATASETS_PATH = VOLUME_PATH / "dataset"
 DATASET_PATH = DATASETS_PATH / "dataset.txt"  # FIXME jsonl
 
 ENGINE_PATHS = [
-    f"/root/{MODEL_ID}/trtllm_engine",
+    # f"/root/{MODEL_ID}/trtllm_engine",
     # f"/root/{MODEL_ID}/trtllm_engine_fp8",
-    # f"/root/{MODEL_ID}/trtllm_engine_fp8_lookahead",
+    f"/root/{MODEL_ID}/trtllm_engine_fp8_lookahead",
     ]
 # ENGINE_PATH = "/vol/engines/trtllm_engine_fp8_lookahead"
 
 # TODO break into building and saving
-def build_engine():
-    from tensorrt_llm import LLM, BuildConfig
+def get_configs(engine_path):
+    from tensorrt_llm import BuildConfig
     from tensorrt_llm.llmapi import QuantConfig, QuantAlgo, CalibConfig, LookaheadDecodingConfig
+
+    if 'fp8' in engine_path:
+        quant_config = QuantConfig(quant_algo=QuantAlgo.FP8)
+
+        calib_config = CalibConfig(
+            calib_batches=512,
+            calib_batch_size=1,
+            calib_max_seq_length=2048,
+            tokenizer_max_seq_length=4096
+        )
+
+        build_config = BuildConfig(
+            max_input_len=2 ** 15,
+            max_num_tokens=2 ** 16,
+            max_batch_size=512,
+        )
+    else:
+        quant_config, calib_config, build_config = None, None, None
+
+    if 'lookahead' in engine_path:
+        # Examples:
+        # https://github.com/NVIDIA/TensorRT-LLM/blob/c366de170f71dd6a350c929ecfdde6a922a05eb1/examples/llm-api/llm_lookahead_decoding.py#L15
+        # https://github.com/NVIDIA/TensorRT-LLM/blob/2ea17cdad28bed0f30e80eea5b1380726a7c6493/examples/llm-api/llm_lookahead_decoding.py#L4
+        decoding_config = LookaheadDecodingConfig(
+            max_window_size=4,
+            max_ngram_size=4,
+            max_verification_set_size=4,
+        )
+    else:
+        decoding_config = None
+
+    return {
+        'quant_config': quant_config,
+        'calib_config': calib_config,
+        'build_config': build_config,
+        'speculative_config': decoding_config
+    }
+
+def build_engines():
+    from tensorrt_llm import LLM
+    from huggingface_hub import snapshot_download
+
+    print(f"downloading base model: {MODEL_ID}")
+    snapshot_download(
+        MODEL_ID,
+        local_dir=MODELS_PATH / MODEL_ID,
+    )
 
     num_engines = len(ENGINE_PATHS)
     for i, engine_path in enumerate(ENGINE_PATHS):
-        if 'fp8' in engine_path:
-            quant_config = QuantConfig(quant_algo=QuantAlgo.FP8)
-
-            calib_config = CalibConfig(
-                calib_batches=512,
-                calib_batch_size=1,
-                calib_max_seq_length=2048,
-                tokenizer_max_seq_length=4096
-            )
-
-            build_config = BuildConfig(
-                max_num_tokens=2048,
-                max_batch_size=512,
-            )
-        else:
-            quant_config, calib_config, build_config = None, None, None
-
-        decoding_config = None
-        if 'lookahead' in engine_path:
-            # https://github.com/NVIDIA/TensorRT-LLM/blob/c366de170f71dd6a350c929ecfdde6a922a05eb1/examples/llm-api/llm_lookahead_decoding.py#L15
-            decoding_config = LookaheadDecodingConfig(
-                max_window_size=4,
-                max_ngram_size=4,
-                max_verification_set_size=4,
-            )
-
-        print(f"{i}/{num_engines}) building engine {engine_path}")
+        print(f"{i}/{num_engines}) building new engine {engine_path}")
         llm = LLM(
-            model=MODEL_ID,
+            model=MODELS_PATH / MODEL_ID,
             tensor_parallel_size=N_GPUS,
-            quant_config=quant_config,
-            calib_config=calib_config,
-            build_config=build_config,
-            speculative_config=decoding_config,
+            **get_configs(engine_path),
         )
 
         print(f"{i}/{num_engines}) saving engine path to {engine_path}")
         llm.save(engine_path)
-        print(f"{i}/{num_engines}) saved engine path to {engine_path}, deleting llm")
-        del llm
 
+        print("deleting llm object to free GPU memory")
+        del llm
 
 tensorrt_image = (
     modal.Image.from_registry(
@@ -107,13 +137,23 @@ tensorrt_image = (
             "HF_HOME": str(MODELS_PATH),
         }
     ).run_function(
-        build_engine,
+        build_engines,
         volumes={VOLUME_PATH: volume},
         cpu=16,
         timeout=120*MINUTES,
         gpu=GPU_CONFIG,
+        secrets=[modal.Secret.from_name("huggingface-secret")],
     )
 )
+
+with tensorrt_image.imports():
+    from datetime import datetime
+
+    import numpy as np
+    import random
+    import torch
+    import transformers
+
 
 @app.cls(
     image=tensorrt_image,
@@ -122,20 +162,50 @@ tensorrt_image = (
     gpu=GPU_CONFIG,
 )
 class Model:
+    def __init__(self, engine_path):
+        self.engine_path = engine_path
+
     @modal.enter()
-    def load(self, engine_path):
+    def load(self):
         from tensorrt_llm import LLM
-        print(f"loading engine {engine_path}")
-        self.llm = LLM(model=engine_path)
+
+        configs = get_configs(self.engine_path)
+
+        print(f"loading engine {self.engine_path}")
+        self.llm = LLM(
+            model=self.engine_path,
+            tensor_parallel_size=N_GPUS,
+            **configs,
+        )
+
+        self.decoding_config = configs['speculative_config']
+        self.cold_boot_s = time.monotonic() - start_time
 
     @modal.method()
-    def inference(self, prompts):
+    async def generate(self, prompt):
         from tensorrt_llm import SamplingParams
-        sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-        outputs = self.llm.generate(prompts, sampling_params)
+        from dataclasses import asdict
+        sampling_params = SamplingParams(
+            temperature=0.8, 
+            top_p=0.95,
+            lookahead_config=self.decoding_config,
+        )
 
-        generated_texts = [output.outputs[0].text for output in outputs]
-        return generated_texts
+        start_time = time.monotonic()
+
+        outputs = self.llm.generate([prompt], sampling_params)
+        llm_latency_ms = int(1000 * (time.monotonic() - start_time))
+
+        outputs = [asdict(output.outputs[0]) for output in outputs] # generation samples
+        results = {
+            "stats": {
+                "llm_latency_ms": llm_latency_ms,
+                "cold_boot_s": self.cold_boot_s,
+            },
+            "outputs": outputs,
+        }
+
+        return results
 
     @modal.exit()
     def shutdown(self):
@@ -206,12 +276,136 @@ def benchmark(engine_path, mode: str = "latency"):
 
     print(f"running trtllm-bench with {engine_path} and mode={mode}")
     subprocess.run(["trtllm-bench", "--model", get_model_path(), mode,
-        "--dataset", DATASET_PATH, "--engine_dir", engine_path])
+        "--dataset", DATASET_PATH, "--engine_dir", engine_path,
+        "--num_requests", "10"])
     print("finished")
 
-
 @app.local_entrypoint()
-def main():
+async def main(
+    prompts_path: str = here / "data" / "raw_samples.jsonl",
+    prompt_key: str = "prompt",
+    max_prompts: int = None,
+    model_name: str = None,
+    engine_kwargs_json_path: str = here / "configs" / "inference_config.json",
+    experiment_id: str = None,
+):
+    for engine_path in ENGINE_PATHS[-1:]:
+    # for engine_path in ENGINE_PATHS:
+        experiment_id = generate_experiment_id()
+        print(f"Running experiment {experiment_id}")
+        prompts_path = Path(prompts_path)
+        engine_kwargs_json_path = Path(engine_kwargs_json_path)
+
+        sample_prompts = load_sample_prompts(prompts_path, prompt_key)[:max_prompts]
+        # sample_prompts = expand_prompts_by_n_factor(sample_prompts, 4)
+        print (f"Benchmarking {len(sample_prompts)} prompts with {engine_path}")
+        engine_kwargs = load_engine_kwargs(engine_kwargs_json_path)
+
+        model_service = Model(engine_path)
+        # model_service = AsyncLLMEngineService(
+            # default_sampling_params={"temperature": 0.0, "max_tokens": 1024},
+            # model_name=model_name,
+            # **engine_kwargs,
+        # )
+        model_service.generate.remote("gm")  # warmup
+
+        tasks = [fetch(prompt, model_service.generate) for prompt in sample_prompts]
+
+        results = []
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            result["engine_path"] = engine_path
+            # print(f"Result completed in {result['client_latency_ms']}ms")
+            result["experiment_id"] = experiment_id
+            results.append(result)
+
+        llm_latencies_ms = [r["stats"]["llm_latency_ms"] for r in results]
+        p50 = np.percentile(llm_latencies_ms, 50)
+        p99 = np.percentile(llm_latencies_ms, 99)
+
+        save_results(results)
+        print(f"Finished experiment {experiment_id} | p50: {p50:.2f}ms / p99: {p99:.2f}ms")
+
+
+async def fetch(prompt, target):
+    start_time = time.monotonic()
+    out_handle = target.spawn(prompt)
+    result = {
+        "prompt_chars": len(prompt),
+        "out_handle": out_handle,
+        "start_time": start_time,
+    }
+    response = await result["out_handle"].get.aio()
+    end_time = time.monotonic()
+    result |= response
+
+    result["client_latency_ms"] = int(1000 * (end_time - start_time))
+    result["response_token_count"] = sum(
+        len(output["token_ids"]) for output in response["outputs"]
+    )
+    result["out_handle"] = result["out_handle"].object_id
+    result["deployment_id"] = str(deployment_id)
+
+    del result["start_time"]
+
+    return result
+
+
+def load_sample_prompts(
+    path=Path(__file__).parent / "data" / "raw_samples.jsonl", prompt_key="prompt"
+):
+    prompts = []
+    with open(path, "r") as f:
+        for line in f:
+            obj = json.loads(line)
+            prompts.append(obj[prompt_key] if prompt_key else obj)
+
+        return prompts
+
+
+def load_engine_kwargs(
+    path=Path(__file__).parent / "configs" / "inference_config.json",
+):
+    return json.loads(Path(path).read_text())
+
+
+def save_results(results, path=Path(__file__).parent / "data" / "results.jsonl"):
+    with open(path, "a") as f:
+        for result in results:
+            f.write(json.dumps(result) + "\n")
+
+def expand_prompts_by_n_factor(prompts, n):
+    "Expand prompts with prefix uniquness to avoid KV cache hits."
+    new_prompts = []
+    for i in range(n):
+        for prompt in prompts:
+            new_prompts.append("\n" * i + prompt)
+    return new_prompts
+
+def seed_everything(seed=0):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def generate_experiment_id():
+    from wonderwords import RandomWord
+
+    r_gen = RandomWord()
+    verb = r_gen.word(
+        include_parts_of_speech=["verb"], word_min_length=4, word_max_length=7
+    )
+    adjective = r_gen.word(
+        include_parts_of_speech=["adjective"], word_min_length=4, word_max_length=7
+    )
+    noun = r_gen.word(
+        include_parts_of_speech=["noun"], word_min_length=4, word_max_length=7
+    )
+
+    return "-".join([verb, adjective, noun])
+
+def main_og():
     code_prompts = [
         "for i",
         "int x = 1\n",
@@ -230,6 +424,7 @@ def main():
     # benchmark.remote()
     # benchmark.remote(ENGINE_PATHS[0])
     benchmark.remote(ENGINE_PATHS[0], "latency")
+    # benchmark.remote(ENGINE_PATHS[1], "latency")
     print ('done')
     return
 
