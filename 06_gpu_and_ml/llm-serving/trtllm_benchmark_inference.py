@@ -1,4 +1,5 @@
 #"kv_cache_quant_algo": "FP8"
+import argparse
 import asyncio
 import hashlib
 import json
@@ -16,9 +17,6 @@ deployment_id = uuid4()
 
 trtllm_version = "0.17.0.post1"
 CUDA_VERSION = "12.8.0"
-
-N_GPUS = 1
-GPU_CONFIG = f"H100:{N_GPUS}"
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 
@@ -68,22 +66,21 @@ with tensorrt_image.imports():
     import torch
 
 
-@app.cls(
-    image=tensorrt_image,
-    container_idle_timeout=10 * MINUTES,
-    volumes={VOLUME_PATH: volume},
-    gpu=GPU_CONFIG,
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-    allow_concurrent_inputs=1,
-    cloud="oci",
-    # region="us-east-1",
-    # concurrency_limit=32,
-    concurrency_limit=1,
-)
-class Model:
+# @app.cls(
+    # image=tensorrt_image,
+    # container_idle_timeout=10 * MINUTES,
+    # volumes={VOLUME_PATH: volume},
+    # secrets=[modal.Secret.from_name("huggingface-secret")],
+    # gpu="H100",
+    # cloud="oci",
+    # allow_concurrent_inputs=1,
+    # concurrency_limit=16
+# )
+class AsyncTRTLLMEngineService:
     def __init__(self, engine_kwargs):
         self.engine_kwargs = engine_kwargs
-        # self.engine_kwargs = json.loads(engine_kwargs_string)
+        self.engine_kwargs["tensor_parallel_size"] = torch.cuda.device_count()
+        print("Number of GPUs:", self.engine_kwargs["tensor_parallel_size"])
 
     @modal.enter()
     def enter(self):
@@ -96,18 +93,9 @@ class Model:
         from tensorrt_llm.plugin.plugin import PluginConfig
         from tensorrt_llm import LLM
 
-        # import tensorrt_llm.logger as trtllm_logger
-        # print(f"Prev TRTLLM Log Level: {trtllm_logger.level}")
-        # trtllm_logger.set_level('error')
-        # print(f"New. TRTLLM Log Level: {trtllm_logger.level}")
-        # import tensorrt_llm
-        # from tensorrt_llm.logger import logger
-        # self.logger = logger
-        # self.llogger.set_level('error')
-
         engine_kwargs = self.engine_kwargs
         engine_folder_name = hash_config_string(json.dumps(engine_kwargs, sort_keys=True))
-        print(f"got engine folder name from hash of config: {engine_folder_name}")
+        print(f"engine config name: {engine_folder_name}")
 
         seed_everything()
 
@@ -139,7 +127,6 @@ class Model:
             LookaheadDecodingConfig(**engine_kwargs["speculative_config"])
         )
 
-        engine_kwargs["tensor_parallel_size"] = N_GPUS
 
         engine_path = MODELS_PATH / MODEL_ID / "trtllm_engine" / engine_folder_name
         if not os.path.exists(engine_path):
@@ -185,56 +172,106 @@ class Model:
 
         return results
 
+    @modal.method()
+    async def noop(self):
+        return {time.monotonic()}
+    # @modal.web_endpoint(method="POST", docs=True)
+    # async def web_generate(self, request: dict):
+        # return request
+
     @modal.exit()
     def shutdown(self):
         del self.llm
 
-@app.local_entrypoint()
-async def main(
-    prompts_path: str = here / "data" / "raw_samples.jsonl",
-    prompt_key: str = "prompt",
-    max_prompts: int = None,
-    model_name: str = None,
-    engine_kwargs_json_path: str = here / "configs" / "trtllm_inference_config.json",
-    save_results_path: str = here / "data" / "results.jsonl",
-    experiment_id: str = None,
-):
+@app.function(
+    image=web_image,
+    # cloud='oci',
+    region='us-east-1',
+    allow_concurrent_inputs=1000
+)
+@modal.web_endpoint(method="POST", docs=True)
+async def web_generate(request: dict):
+    model_service = AsyncTRTLLMEngineService(request['inference_config'])
 
-    experiment_id = generate_experiment_id()
-    print(f"Running experiment {experiment_id}")
-    prompts_path = Path(prompts_path)
-    engine_kwargs_json_path = Path(engine_kwargs_json_path)
+    if request['prompt'] == "noop":
+        return await model_service.noop.remote.aio()
+    return await model_service.generate.remote.aio(request['prompt'])
 
-    sample_prompts = load_sample_prompts(prompts_path, prompt_key)[:max_prompts]
-    # sample_prompts = expand_prompts_by_n_factor(sample_prompts, 4)
-    print (f"Benchmarking {len(sample_prompts)} prompts with config: {engine_kwargs_json_path}")
-    engine_kwargs = json.loads(Path(engine_kwargs_json_path).read_text())
 
-    model_service = Model(engine_kwargs)
-    model_service.generate.remote("gm")  # warmup
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prompts_path", type=str, default=here / "data" / "raw_samples.jsonl")
+    parser.add_argument("--prompt_key", type=str, default="prompt")
+    parser.add_argument("--max_prompts", type=int, default=None)
+    parser.add_argument("--engine_kwargs_json_path", type=str, default=here / "configs" / "trtllm_inference_config.json")
+    parser.add_argument("--infrastructure_kwargs_json_path", type=str, default=here / "configs" / "infrastructure_config.json")
+    parser.add_argument("--save_results_path", type=str, default=here / "data" / "results.jsonl")
+    args = parser.parse_args()
 
-    tasks = [fetch(prompt, model_service.generate) for prompt in sample_prompts]
+    prompts_path = args.prompts_path
+    prompt_key = args.prompt_key
+    max_prompts = args.max_prompts
+    engine_kwargs_json_path = args.engine_kwargs_json_path
+    infrastructure_kwargs_json_path = args.infrastructure_kwargs_json_path
+    save_results_path = args.save_results_path
 
-    results = []
-    for task in asyncio.as_completed(tasks):
-        result = await task
-        result["inference_config"] = engine_kwargs
-        # print(f"Result completed in {result['client_latency_ms']}ms")
-        result["experiment_id"] = experiment_id
-        results.append(result)
+    infrastructure_kwargs = json.loads(Path(infrastructure_kwargs_json_path).read_text())
 
-    save_results(save_results_path, results)
+    model_class = app.cls(
+        image=tensorrt_image,
+        container_idle_timeout=10 * MINUTES,
+        volumes={VOLUME_PATH: volume},
+        secrets=[modal.Secret.from_name("huggingface-secret")],
+        **infrastructure_kwargs
+    )(AsyncTRTLLMEngineService)
 
-    print(f"Finished experiment {experiment_id} | sample_size={len(sample_prompts)}")
-    for (key_name, get_value) in (
-        ("llm_latency_ms", lambda x: x["stats"]["llm_latency_ms"]),
-        ("client_latency_ms", lambda x: x["client_latency_ms"]),
-    ):
-        stats = [get_value(r) for r in results]
-        p50 = np.percentile(stats, 50)
-        p99 = np.percentile(stats, 99)
+    with modal.enable_output():
+        with app.run():
+            globals().update(vars(args))
+            experiment_id = generate_experiment_id()
+            print(f"Running experiment {experiment_id}")
+            prompts_path = Path(prompts_path)
+            engine_kwargs_json_path = Path(engine_kwargs_json_path)
 
-        print(f"\t {key_name:<20}: p50: {p50:>6.2f}ms / p99: {p99:>6.2f}ms")
+            sample_prompts = load_sample_prompts(prompts_path, prompt_key)[:max_prompts]
+            print(f"Benchmarking {len(sample_prompts)} prompts")
+            print(f"\tEngine Config:: {engine_kwargs_json_path}")
+            print(f"\tInfrastructure Config:: {infrastructure_kwargs_json_path}")
+            engine_kwargs = json.loads(Path(engine_kwargs_json_path).read_text())
+            engine_kwargs["tensor_parallel_size"] = get_gpu_count(infrastructure_kwargs["gpu"])
+
+            model_service = model_class(engine_kwargs)
+            model_service.generate.remote("gm")  # warmup
+
+            tasks = [fetch(prompt, model_service.generate) for prompt in sample_prompts]
+
+            results = []
+            for task in asyncio.as_completed(tasks):
+                result = await task
+                result["inference_config"] = engine_kwargs
+                result["infrastructure_config"] = infrastructure_kwargs
+                # print(f"Result completed in {result['client_latency_ms']}ms")
+                result["experiment_id"] = experiment_id
+                results.append(result)
+
+            save_results(save_results_path, results)
+
+            print(f"Finished experiment {experiment_id} | sample_size={len(sample_prompts)}")
+            for (key_name, get_value) in (
+                ("llm_latency_ms", lambda x: x["stats"]["llm_latency_ms"]),
+                ("client_latency_ms", lambda x: x["client_latency_ms"]),
+            ):
+                stats = [get_value(r) for r in results]
+                p50 = np.percentile(stats, 50)
+                p99 = np.percentile(stats, 99)
+
+                print(f"\t {key_name:<20}: p50: {p50:>6.2f}ms / p99: {p99:>6.2f}ms")
+
+
+def get_gpu_count(gpu_string):
+    if ":" not in gpu_string:
+        return 1
+    return int(gpu_string[gpu_string.index(":") + 1:])
 
 
 async def fetch(prompt, target):
@@ -290,4 +327,8 @@ def generate_experiment_id():
     )
 
 def hash_config_string(config_string):
+        # self.engine_kwargs = json.loads(engine_kwargs_string)
     return hashlib.md5(config_string.encode()).hexdigest()
+
+if __name__ == "__main__":
+    asyncio.run(main())

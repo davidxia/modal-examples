@@ -1,0 +1,6 @@
+{
+    "gpu": "H100:2",
+    "cloud": "oci",
+    "allow_concurrent_inputs": 1,
+    "concurrency_limit": 16
+}

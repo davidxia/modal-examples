@@ -1,0 +1,8 @@
+{
+    "enable_prefix_caching": true,
+    "speculative_model": "[ngram]",
+    "num_speculative_tokens": 16,
+    "ngram_prompt_lookup_max": 4,
+    "enable_chunked_prefill": true,
+    "compilation_config": 0
+}

@@ -1,0 +1,36 @@
+{
+    "quant_config":
+        {
+            "quant_algo": "FP8"
+        },
+    "kv_cache_config":
+        {
+            "free_gpu_memory_fraction" : 0.1
+        },
+    "calib_config":
+        {
+            "calib_batches": 512,
+            "calib_batch_size": 1,
+            "calib_max_seq_length" : 2048,
+            "tokenizer_max_seq_length" : 4096
+        },
+    "build_config": 
+        {
+            "plugin_config":
+                {
+                    "multiple_profiles": true,
+                    "use_paged_context_fmha": true,
+                    "low_latency_gemm_swiglu_plugin": "fp8",
+                    "low_latency_gemm_plugin": "fp8"
+                },
+            "max_input_len": 32768,
+            "max_num_tokens": 65536,
+            "max_batch_size": 16
+        },
+    "speculative_config":
+        {
+            "max_window_size" : 4,
+            "max_ngram_size" : 4,
+            "max_verification_set_size" : 4
+        }
+}

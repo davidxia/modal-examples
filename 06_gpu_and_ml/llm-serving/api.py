@@ -422,7 +422,6 @@ web_image = (
 @modal.web_endpoint(method="POST", docs=True)
 async def web_generate(request: dict):
     return request['prompt']
-    # engine_path = ENGINE_PATHS[-1]
     # output = await Model(engine_path).generate.remote.aio(request['prompt'])
     # return output
 
