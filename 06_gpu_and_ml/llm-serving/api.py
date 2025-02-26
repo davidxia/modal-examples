@@ -66,8 +66,9 @@ def get_configs(engine_path):
         build_config = BuildConfig(
             max_input_len=2 ** 15,
             max_num_tokens=2 ** 16,
-            max_batch_size=512,
+            max_batch_size=16,
         )
+        build_config.plugin_config.multiple_profiles = True
     else:
         quant_config, calib_config, build_config = None, None, None
 
@@ -102,7 +103,7 @@ def build_engines():
 
     num_engines = len(ENGINE_PATHS)
     for i, engine_path in enumerate(ENGINE_PATHS):
-        print(f"{i}/{num_engines}) building new engine {engine_path}")
+        print(f"{i}/{num_engines}) building new2 engine {engine_path}")
         llm = LLM(
             model=MODELS_PATH / MODEL_ID,
             tensor_parallel_size=N_GPUS,
@@ -160,14 +161,17 @@ with tensorrt_image.imports():
     container_idle_timeout=10 * MINUTES,
     volumes={VOLUME_PATH: volume},
     gpu=GPU_CONFIG,
+    allow_concurrent_inputs=1,
+    concurrency_limit=32,
 )
 class Model:
-    def __init__(self, engine_path):
-        self.engine_path = engine_path
+    # def __init__(self, engine_path):
+        # self.engine_path = engine_path
 
     @modal.enter()
     def load(self):
         from tensorrt_llm import LLM
+        self.engine_path = ENGINE_PATHS[-1]
 
         configs = get_configs(self.engine_path)
 
@@ -207,6 +211,57 @@ class Model:
 
         return results
 
+    @modal.asgi_app()
+    def web(self):
+        import io
+        from fastapi import FastAPI
+        from fastapi.responses import PlainTextResponse
+
+        webapp = FastAPI()
+
+        @webapp.get("/", response_class=PlainTextResponse)
+        @webapp.get("/health", response_class=PlainTextResponse)
+        async def health():
+            print("health check")
+            return "OK"
+
+        @webapp.post("/")
+        @webapp.post("/predict")
+        async def predict(request: dict):
+            from tensorrt_llm import SamplingParams
+            from dataclasses import asdict
+
+            prompt = request['prompt']
+            sampling_params = SamplingParams(
+                temperature=0.8, 
+                top_p=0.95,
+                lookahead_config=self.decoding_config,
+            )
+
+            start_time = time.monotonic()
+
+            outputs = self.llm.generate([prompt], sampling_params)
+            llm_latency_ms = int(1000 * (time.monotonic() - start_time))
+
+            outputs = [asdict(output.outputs[0]) for output in outputs] # generation samples
+            results = {
+                "stats": {
+                    "llm_latency_ms": llm_latency_ms,
+                    "cold_boot_s": self.cold_boot_s,
+                },
+                "outputs": outputs,
+            }
+
+            return results
+
+        return webapp
+
+    # @moda.web_endpoint(method="POST", docs=True)
+    # async def web_generate(self, request: dict):
+        # engine_path = ENGINE_PATHS[-1]
+        # output = await self.generate.remote.aio(request['prompt'])
+        # return output
+
     @modal.exit()
     def shutdown(self):
         del self.llm
@@ -225,6 +280,7 @@ def get_model_path():
 @app.function(
     image=tensorrt_image,
     container_idle_timeout=10 * MINUTES,
+    region='us-east-1',
     keep_warm=1,
     volumes={VOLUME_PATH: volume},
     gpu=GPU_CONFIG,
@@ -256,6 +312,7 @@ def prepare_dataset(
 @app.function(
     image=tensorrt_image,
     container_idle_timeout=10 * MINUTES,
+    region='us-east-1',
     timeout=120 * MINUTES,
     volumes={VOLUME_PATH: volume},
     gpu=GPU_CONFIG,
@@ -301,7 +358,8 @@ async def main(
         print (f"Benchmarking {len(sample_prompts)} prompts with {engine_path}")
         engine_kwargs = load_engine_kwargs(engine_kwargs_json_path)
 
-        model_service = Model(engine_path)
+        # model_service = Model(engine_path)
+        model_service = Model()
         # model_service = AsyncLLMEngineService(
             # default_sampling_params={"temperature": 0.0, "max_tokens": 1024},
             # model_name=model_name,
@@ -349,6 +407,24 @@ async def fetch(prompt, target):
     del result["start_time"]
 
     return result
+
+web_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install(
+        "fastapi[standard]==0.115.4", 
+        "starlette==0.41.2",
+    )
+@app.function(
+    image=web_image,
+    region='us-east-1',
+    allow_concurrent_inputs=1000
+)
+@modal.web_endpoint(method="POST", docs=True)
+async def web_generate(request: dict):
+    return request['prompt']
+    # engine_path = ENGINE_PATHS[-1]
+    # output = await Model(engine_path).generate.remote.aio(request['prompt'])
+    # return output
 
 
 def load_sample_prompts(
