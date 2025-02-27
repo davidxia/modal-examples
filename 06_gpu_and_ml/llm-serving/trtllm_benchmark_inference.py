@@ -9,6 +9,7 @@ import time
 from uuid import uuid4
 
 import modal
+import modal.runner
 
 start_time = time.monotonic()  # on remote, time that code started running Modal
 
@@ -65,22 +66,27 @@ with tensorrt_image.imports():
     import random
     import torch
 
-
 # @app.cls(
     # image=tensorrt_image,
     # container_idle_timeout=10 * MINUTES,
     # volumes={VOLUME_PATH: volume},
     # secrets=[modal.Secret.from_name("huggingface-secret")],
-    # gpu="H100",
+    # gpu="H100:2",
     # cloud="oci",
     # allow_concurrent_inputs=1,
     # concurrency_limit=16
 # )
+# @app.cls(
+    # image=tensorrt_image,
+    # container_idle_timeout=10 * MINUTES,
+    # volumes={VOLUME_PATH: volume},
+    # secrets=[modal.Secret.from_name("huggingface-secret")],
+    # **infrastructure_kwargs
+# )
 class AsyncTRTLLMEngineService:
-    def __init__(self, engine_kwargs):
-        self.engine_kwargs = engine_kwargs
-        self.engine_kwargs["tensor_parallel_size"] = torch.cuda.device_count()
-        print("Number of GPUs:", self.engine_kwargs["tensor_parallel_size"])
+    # engine_kwargs_string: str = modal.parameter()
+    def __init__(self, engine_kwargs_string):
+        self.engine_kwargs_string = engine_kwargs_string
 
     @modal.enter()
     def enter(self):
@@ -93,7 +99,10 @@ class AsyncTRTLLMEngineService:
         from tensorrt_llm.plugin.plugin import PluginConfig
         from tensorrt_llm import LLM
 
-        engine_kwargs = self.engine_kwargs
+        # self.engine_kwargs_string = '{"tensor_parallel_size": 2}'
+        engine_kwargs = json.loads(self.engine_kwargs_string)
+        print("Number of GPUs:", engine_kwargs["tensor_parallel_size"])
+
         engine_folder_name = hash_config_string(json.dumps(engine_kwargs, sort_keys=True))
         print(f"engine config name: {engine_folder_name}")
 
@@ -127,7 +136,6 @@ class AsyncTRTLLMEngineService:
             LookaheadDecodingConfig(**engine_kwargs["speculative_config"])
         )
 
-
         engine_path = MODELS_PATH / MODEL_ID / "trtllm_engine" / engine_folder_name
         if not os.path.exists(engine_path):
             print(f"building new engine at {engine_path}")
@@ -153,11 +161,6 @@ class AsyncTRTLLMEngineService:
         )
 
         start_time = time.monotonic()
-
-        # outputs = self.llm.generate([prompt], sampling_params)
-        # llm_latency_ms = int(1000 * (time.monotonic() - start_time))
-# 
-        # outputs = [asdict(output.outputs[0]) for output in outputs] # generation samples
         output = await self.llm.generate_async(prompt, sampling_params)
         llm_latency_ms = int(1000 * (time.monotonic() - start_time))
 
@@ -175,28 +178,14 @@ class AsyncTRTLLMEngineService:
     @modal.method()
     async def noop(self):
         return {time.monotonic()}
-    # @modal.web_endpoint(method="POST", docs=True)
-    # async def web_generate(self, request: dict):
-        # return request
+
+    @modal.web_endpoint(method="POST", docs=True)
+    async def web_generate(self, request: dict):
+        return self.generate.local(request['prompt'])
 
     @modal.exit()
     def shutdown(self):
         del self.llm
-
-@app.function(
-    image=web_image,
-    # cloud='oci',
-    region='us-east-1',
-    allow_concurrent_inputs=1000
-)
-@modal.web_endpoint(method="POST", docs=True)
-async def web_generate(request: dict):
-    model_service = AsyncTRTLLMEngineService(request['inference_config'])
-
-    if request['prompt'] == "noop":
-        return await model_service.noop.remote.aio()
-    return await model_service.generate.remote.aio(request['prompt'])
-
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -217,6 +206,12 @@ async def main():
 
     infrastructure_kwargs = json.loads(Path(infrastructure_kwargs_json_path).read_text())
 
+    prompts_path = args.prompts_path
+    prompt_key = args.prompt_key
+    max_prompts = args.max_prompts
+    engine_kwargs_json_path = args.engine_kwargs_json_path
+    save_results_path = args.save_results_path
+
     model_class = app.cls(
         image=tensorrt_image,
         container_idle_timeout=10 * MINUTES,
@@ -227,7 +222,6 @@ async def main():
 
     with modal.enable_output():
         with app.run():
-            globals().update(vars(args))
             experiment_id = generate_experiment_id()
             print(f"Running experiment {experiment_id}")
             prompts_path = Path(prompts_path)
@@ -235,13 +229,16 @@ async def main():
 
             sample_prompts = load_sample_prompts(prompts_path, prompt_key)[:max_prompts]
             print(f"Benchmarking {len(sample_prompts)} prompts")
-            print(f"\tEngine Config:: {engine_kwargs_json_path}")
-            print(f"\tInfrastructure Config:: {infrastructure_kwargs_json_path}")
+            print(f"\tEngine Config: {engine_kwargs_json_path}")
+            print(f"\tInfrastructure Config: {infrastructure_kwargs_json_path}")
             engine_kwargs = json.loads(Path(engine_kwargs_json_path).read_text())
             engine_kwargs["tensor_parallel_size"] = get_gpu_count(infrastructure_kwargs["gpu"])
+            engine_kwargs_string = json.dumps(engine_kwargs)
 
-            model_service = model_class(engine_kwargs)
-            model_service.generate.remote("gm")  # warmup
+
+            # AsyncTRTLLMEngineService       
+            model_service = model_class(engine_kwargs_string=engine_kwargs_string)
+            await model_service.generate.remote.aio("gm")  # warmup
 
             tasks = [fetch(prompt, model_service.generate) for prompt in sample_prompts]
 
@@ -327,7 +324,6 @@ def generate_experiment_id():
     )
 
 def hash_config_string(config_string):
-        # self.engine_kwargs = json.loads(engine_kwargs_string)
     return hashlib.md5(config_string.encode()).hexdigest()
 
 if __name__ == "__main__":

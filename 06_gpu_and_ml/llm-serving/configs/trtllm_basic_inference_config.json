@@ -22,8 +22,8 @@
         },
     "speculative_config":
         {
-            "max_window_size" : 4,
-            "max_ngram_size" : 4,
-            "max_verification_set_size" : 4
+            "max_window_size" : 8,
+            "max_ngram_size" : 8,
+            "max_verification_set_size" : 8
         }
 }
