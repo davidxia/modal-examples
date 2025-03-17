@@ -1,4 +1,3 @@
-#"kv_cache_quant_algo": "FP8"
 import argparse
 import asyncio
 import hashlib
