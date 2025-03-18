@@ -301,7 +301,7 @@ def setup_mmcif_database(
 @app.local_entrypoint()
 def main(
     uniref_db_name="uniref30_2302",
-    metagenomic_db_name="colabfold_envdb_2021",
+    metagenomic_db_name="colabfold_envdb_202108",
     pdb_db_name="pdb100_230517",
     pdb_foldseek_db_name="pdb100_foldseek_230517",
     pdb_aws_snapshot: str = "20240101",
