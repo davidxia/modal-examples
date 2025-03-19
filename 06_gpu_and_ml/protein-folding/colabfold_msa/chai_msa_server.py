@@ -27,19 +27,18 @@ with image.imports():
     import pandas as pd
 
 
-vol = modal.Volume.from_name("mmseqs-colabfold-data-advay", create_if_missing=True)
-shariq_vol = modal.Volume.from_name("example-compbio-colab-v3", create_if_missing=True)
+vol = modal.Volume.from_name("mmseqs-colabfold-data-advay")
 
 app = modal.App(MODAL_APP_NAME, image=image)
 
 
 @app.cls(
     image=image,
-    cpu=4,
+    cpu=32,
     memory=(16 * 1024, 64 * 1024),
     gpu="L40S",  # env db requires 40GB GPU; uniref30 requires 10GB
-    volumes={"/data": vol, "/shariq": shariq_vol},
-    timeout=8 * 60 * 60,
+    volumes={"/data": vol},
+    timeout=60 * 60,
     ephemeral_disk=768 * 1024,
     scaledown_window=60 * 2,  # Keep alive for 2 min
     max_containers=10,
@@ -54,28 +53,11 @@ class MmseqsServer:
 
     @modal.enter()
     def startup(self):
-        """Startup; index all databases."""
-        assert self.mmseqs_binary.exists()
-        self.create_databases()
-        for db in self.databases():
-            self.index_database(db)
-
-    def create_databases(self):
-        envdb = "envdb/colabfold_envdb_202108_gpu_db"
-        uniref30 = "uniref/uniref30_2302_gpu_db"
-
-        database_suffixes = [envdb, uniref30]
-        databases = [f"/data/{db}" for db in database_suffixes]
-        for d in range(len(databases)):
-            database_suffix = database_suffixes[d]
-            tsv_name = database_suffix.split("/")[-1].replace("_gpu_db", "")
-            database = databases[d]
-            if not Path(database).exists():
-                import subprocess
-                cmd = f"{self.mmseqs_binary} tsv2exprofiledb /shariq/data/{tsv_name} {database} --gpu 1"
-                print (cmd)
-                subprocess.run(cmd, shell=True, check=True)
-
+        pass
+        # """Startup; index all databases."""
+        # assert self.mmseqs_binary.exists()
+        # for db in self.databases():
+        #     self.index_database(db)
 
     @staticmethod
     def databases() -> list[str]:
@@ -83,10 +65,10 @@ class MmseqsServer:
         # All databases should be GPU-friendly padded versions
         # Creation command (run separately then uploaded):
         # mmseqs tsv2exprofiledb "colabfold_envdb_202108" "colabfold_envdb_202108_db" --gpu 1
-        envdb = "envdb/colabfold_envdb_202108_gpu_db"
+        envdb = "envdb/colabfold_envdb_202108_db"
         # Creation command (run separately then uploaded):
         # mmseqs tsv2exprofiledb "uniref30_2302" "uniref30_2302_db" --gpu 1
-        uniref30 = "uniref/uniref30_2302_gpu_db"
+        uniref30 = "uniref/uniref30_2302_db"
 
         # Gather, check existence in data volume, return
         database_suffixes = [envdb, uniref30]
@@ -152,12 +134,10 @@ def _run_easy_search(
     sequence: str, db: str, mmseqs_bin: str, use_gpu: bool = True, num_threads: int = 16
 ) -> list[str]:
     """Run easy-search on the given sequence, returning contents of resulting file.
-
     Runtime for a single sequence query on colabfold env db:
     - A100: 30 seconds
     - 16 CPU cores: 5 min
     - 60 CPU cores: 2 min
-
     Memory consumption (RAM if CPU, GPU memory if GPU):
     - Colabfold env db: ~40GB
     - UniRef30 DB: ~10GB
@@ -207,7 +187,7 @@ def _run_easy_search(
     return contents
 
 
-@app.function(timeout=8 * 60 * 60)
+@app.function(timeout=60 * 60)
 def server_easy_search(protein_sequence: str) -> pd.DataFrame:
     """Run easy-search on the given protein sequence."""
     server = MmseqsServer()
@@ -216,5 +196,11 @@ def server_easy_search(protein_sequence: str) -> pd.DataFrame:
     return responses
 
 @app.local_entrypoint()
-def main():
-    server_easy_search.remote("MSSYVYDTRKQVYKQYKQVYKQYKQVYKQYKQVYKQ")
+def main(protein_sequence: str):
+    # Example sequence
+    protein_sequence = "MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG"
+    # Run search
+    results_df = server_easy_search.remote(protein_sequence)
+    
+    # Save to CSV
+    results_df.to_csv("output.csv", index=False)
