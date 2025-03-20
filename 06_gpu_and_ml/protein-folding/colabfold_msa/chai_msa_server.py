@@ -186,6 +186,10 @@ def _run_easy_search(
 
     return contents
 
+def _run_easy_search_test():
+    query_fasta = Path(tmpdir) / "test.fa"
+    pass
+
 
 @app.function(timeout=60 * 60)
 def server_easy_search(protein_sequence: str) -> pd.DataFrame:
@@ -195,12 +199,18 @@ def server_easy_search(protein_sequence: str) -> pd.DataFrame:
     responses = requests.get()
     return responses
 
+@app.function(timeout=60 * 60)
+def server_easy_search_test():
+    server = MmseqsServer()
+    requests = server.run_query_test()
+    responses = requests.get()
+    return responses
+
 @app.local_entrypoint()
 def main(protein_sequence: str):
     # Example sequence
     protein_sequence = "MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG"
     # Run search
-    results_df = server_easy_search.remote(protein_sequence)
-    
+    results_df = server_easy_search_test.remote(protein_sequence)
     # Save to CSV
     results_df.to_csv("output.csv", index=False)
