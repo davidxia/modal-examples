@@ -28,23 +28,19 @@ import modal
 vllm_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
-        "vllm==0.7.2",
+        "vllm==0.8.2",
         "huggingface_hub[hf_transfer]==0.26.2",
-        "flashinfer-python==0.2.0.post2",  # pinning, very unstable
-        extra_index_url="https://flashinfer.ai/whl/cu124/torch2.5",
     )
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})  # faster model transfers
 )
 
 # In its 0.7 release, vLLM added a new version of its backend infrastructure,
 # the [V1 Engine](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html).
-# Using this new engine can lead to some [impressive speedups](https://github.com/modal-labs/modal-examples/pull/1064),
-# but as of version 0.7.2 the new engine does not support all inference engine features
-# (including important performance optimizations like
-# [speculative decoding](https://docs.vllm.ai/en/v0.7.2/features/spec_decode.html)).
+# Using this new engine can lead to some [impressive speedups](https://github.com/modal-labs/modal-examples/pull/1064).
+# As of version 0.8, this engine is now on by default.
 
-# The features we use in this demo are supported, so we turn the engine on by setting an environment variable
-# on the Modal Image.
+# However, it is still relatively fresh. You can disable it by setting the `VLLM_USE_V1`
+# environment variable to `"0"`.
 
 vllm_image = vllm_image.env({"VLLM_USE_V1": "1"})
 
@@ -95,6 +91,8 @@ VLLM_PORT = 8000
     allow_concurrent_inputs=100,
     # how long should we stay up with no requests?
     scaledown_window=15 * MINUTES,
+    # allow for slow cold starts
+    timeout=20 * MINUTES,
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
