@@ -2,7 +2,10 @@
 # deploy: true
 # ---
 
-# # Fine-tune Flux on your pet using LoRA
+# # Fine-tune Flux on Studio Ghibli outputs from GPT-4o
+
+# NOTE: this is a janky version of the example in a branch.
+# The prose and UI aren't updated to match the fine-tuning behavior.
 
 # This example finetunes the [Flux.1-dev model](https://huggingface.co/black-forest-labs/FLUX.1-dev)
 # on images of a pet (by default, a puppy named Qwerty)
@@ -105,10 +108,10 @@ class SharedConfig:
     """Configuration information shared across project components."""
 
     # The instance name is the "proper noun" we're teaching the model
-    instance_name: str = "Qwerty"
+    instance_name: str = "Studio Ghibli"
     # That proper noun is usually a member of some class (person, bird),
     # and sharing that information with the model helps it generalize better.
-    class_name: str = "Golden Retriever"
+    class_name: str = "style"
     # identifier for pretrained models on Hugging Face
     model_name: str = "black-forest-labs/FLUX.1-dev"
 

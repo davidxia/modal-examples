@@ -1,3 +1,3 @@
-https://modal-public-assets.s3.amazonaws.com/example-dreambooth-app/fkRYgv6.png
-https://modal-public-assets.s3.amazonaws.com/example-dreambooth-app/98k9yDg.jpg
-https://modal-public-assets.s3.amazonaws.com/example-dreambooth-app/gHlW8Kw.jpg
+https://pbs.twimg.com/media/Gm-e5SdXIAA_-2F?format=jpg&name=medium
+https://pbs.twimg.com/media/Gm-eMCiWgAALDr-?format=jpg&name=large
+https://modal-public-assets.s3.us-east-1.amazonaws.com/tmp_rM2qIMH.png
