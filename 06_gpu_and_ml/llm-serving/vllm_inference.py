@@ -74,6 +74,23 @@ vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 # We wrap it in the [`@modal.web_server` decorator](https://modal.com/docs/guide/webhooks#non-asgi-web-servers)
 # to connect it to the Internet.
 
+# ### Configuring the vLLM server
+
+# Like any good framework, vLLM is highly configurable.
+# For simple deployments, we recommend setting configuration
+# parameters directly in the code.For more complex deployments, you can use a
+# [parametrized Cls](https://modal.com/docs/guide/webhooks#serve-many-configurations-with-parametrized-functions).
+
+# Below, we configure the graph compilation settings.
+# vLLM supports graph compilation via the Torch compiler.
+# With the default settings, this adds a few tens of seconds or more to
+# the server startup in exchange for reduced host overhead during inference.
+# It is particularly important for smaller models, shorter contexts, and
+# more powerful GPUs with faster memory.
+
+# To reduce the added latency during startup, we'll turn off compilation with the `-O0` flag.
+# The default, highest, and recommended level is `"-O3"`.
+
 app = modal.App("example-vllm-openai-compatible")
 
 N_GPU = 1  # tip: for best results, first upgrade to more powerful GPUs, and only then increase GPU count
@@ -98,7 +115,7 @@ VLLM_PORT = 8000
         "/root/.cache/vllm": vllm_cache_vol,
     },
 )
-@modal.web_server(port=VLLM_PORT, startup_timeout=5 * MINUTES)
+@modal.web_server(port=VLLM_PORT, startup_timeout=20 * MINUTES)
 def serve():
     import subprocess
 
@@ -115,7 +132,11 @@ def serve():
         str(VLLM_PORT),
         "--api-key",
         API_KEY,
+        "--compilation-config",
+        '\'{"level": "0"}\'',  # graph compilation level
     ]
+
+    print(*cmd)
 
     subprocess.Popen(" ".join(cmd), shell=True)
 
