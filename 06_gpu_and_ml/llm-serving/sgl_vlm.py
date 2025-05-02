@@ -53,7 +53,6 @@ MODEL_CHAT_TEMPLATE = "qwen2-vl"
 
 
 def download_model_to_image():
-    import transformers
     from huggingface_hub import snapshot_download
 
     snapshot_download(
@@ -61,9 +60,6 @@ def download_model_to_image():
         revision=MODEL_REVISION,
         ignore_patterns=["*.pt", "*.bin"],
     )
-
-    # otherwise, this happens on first inference
-    transformers.utils.move_cache()
 
 
 # Modal runs Python functions on containers in the cloud.
@@ -76,18 +72,22 @@ tag = f"{cuda_version}-{flavor}-{operating_sys}"
 
 vlm_image = (
     modal.Image.from_registry(f"nvidia/cuda:{tag}", add_python="3.11")
-    .pip_install(  # add sglang and some Python dependencies
-        "transformers==4.47.1",
-        "numpy<2",
-        "fastapi[standard]==0.115.4",
-        "pydantic==2.9.2",
-        "requests==2.32.3",
-        "starlette==0.41.2",
-        "torch==2.4.0",
-        "sglang[all]==0.4.1",
-        "sgl-kernel==0.1.0",
-        # as per sglang website: https://sgl-project.github.io/start/install.html
-        extra_options="--find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/",
+    .pip_install("uv")
+    .run_commands(
+        "uv pip install --system --compile-bytecode "
+        # add sglang and some Python dependencies
+        "'numpy<2' "
+        "fastapi[standard]==0.115.4 "
+        "pydantic==2.9.2 "
+        "requests==2.32.3 "
+        "starlette==0.41.2 "
+        "torch==2.6.0 "
+        "sglang[all]==0.4.6.post2 "
+        "sgl-kernel==0.1.1 "
+        "vllm==0.8.3 "
+        # # as per sglang website: https://sgl-project.github.io/start/install.html
+        "--find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/"
+        # extra_options="--find-links https://flashinfer.ai/whl/cu126/torch2.6/flashinfer/",
     )
     .run_function(  # download the model by running a Python function
         download_model_to_image
